@@ -1,0 +1,215 @@
+#include <asf.h>
+
+
+#define D0  PORT_PB00;
+#define D1  PORT_PB01;
+#define D2  PORT_PB02;
+#define D3  PORT_PB03;
+#define D4  PORT_PB04;
+#define D5  PORT_PB05;
+#define D6  PORT_PB06;
+#define D7  PORT_PB07;
+#define En  PORT_PB08;	//enable
+#define RW  PORT_PB09;	//register selection (data/instruction)
+#define RS  PORT_PB10;	//read/write
+
+
+
+void clockSetup(void);
+void wait(volatile int d);
+void portSetup(void);
+void busyCheck(void);
+void EnToggle(void);
+void instructionSetup(void);
+void writeLCD(char *a);
+
+volatile char array[] = "hulloh hi hola como estas";
+volatile char *ptr;
+
+
+
+
+int main (void){
+	
+	system_init();
+ 	clockSetup();
+	portSetup();
+	instructionSetup();
+	Port *por = PORT;
+	PortGroup *porB = &(por->Group[1]);
+	ptr = array;
+
+		
+		while(*ptr != NULL){
+			writeLCD(ptr++);
+		}
+		/*busyCheck();
+	porB->OUT.reg = 0b0000001111;	//turns on display, cursor, and blinking
+		EnToggle();
+		wait(10);
+		busyCheck();
+		porB->OUT.reg =	0b0000011000;	//shifts display
+		EnToggle();
+		wait(1);
+		busyCheck();
+		porB->OUT.reg =	0b0000011000;	//shifts display
+		EnToggle();
+		wait(1);		
+		busyCheck();
+		porB->OUT.reg =	0b0000011000;	//shifts display
+		EnToggle();
+		wait(1);
+		busyCheck();
+		porB->OUT.reg =	0b0000011000;	//shifts display
+		EnToggle();
+		wait(1);
+		busyCheck();
+		porB->OUT.reg =	0b0000011000;	//shifts display
+		EnToggle();
+		wait(1);		
+		busyCheck();
+		porB->OUT.reg =	0b0000000010;	//return home
+		EnToggle();*/
+		wait(1);
+		
+		while(1){}
+}
+
+///////////////////////       SETUP FUNCTIONS     /////////////////////////
+void clockSetup(void){
+//setting up the clock source
+
+	/* Various bits in the INTFLAG register can be set to one at startup.
+		This will ensure that these bits are cleared */
+	SYSCTRL->INTFLAG.reg = SYSCTRL_INTFLAG_BOD33RDY | SYSCTRL_INTFLAG_BOD33DET | SYSCTRL_INTFLAG_DFLLRDY;
+	//SYSCTRL->OSC8M.bit.PRESC = 0;	//divide the clock by 8	so 1MHz still
+	//SYSCTRL->OSC8M.bit.ONDEMAND = 1;	//clock is off is no peripheral request
+	//SYSCTRL->OSC8M.bit.RUNSTDBY = 0;	//clock is off in sleep mode
+	//SYSCTRL->OSC8M.reg |= 1<<1;	//enable clock
+	////SYSCTRL->OSC8M.bit.FRANGE = 2;	//yet another way to control manipulate the clock freq	
+	
+	SYSCTRL->OSC32K.bit.STARTUP = 0;	//start up asap
+	SYSCTRL->OSC32K.bit.ONDEMAND = 1;	//clock is off if no peripheral request
+	SYSCTRL->OSC32K.bit.RUNSTDBY = 1;	//clock is on in sleep mode
+	SYSCTRL->OSC32K.bit.EN32K = 1;	//enable output
+	SYSCTRL->OSC32K.reg |= 1<<1;	//enable clock
+	
+	
+//setting up the clock generator
+
+	GCLK->CTRL.bit.SWRST = 1;	//reset the generators
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for the reset to complete  
+		
+//this section sets up division for chosen Genclk
+	GCLK->GENDIV.reg = GCLK_GENDIV_ID(0) | GCLK_GENDIV_DIV(1);
+
+//this section enables chosen Genclk and configures it
+
+	//GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(0) | GCLK_GENCTRL_GENEN | GCLK_GENCTRL_OE | 
+	//GCLK_GENCTRL_SRC_OSC8M | !GCLK_GENCTRL_DIVSEL | !GCLK_GENCTRL_RUNSTDBY;
+	GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(0) | GCLK_GENCTRL_GENEN | GCLK_GENCTRL_OE |
+	GCLK_GENCTRL_SRC_OSC32K | GCLK_GENCTRL_RUNSTDBY;
+	
+//this section chooses what Genclk goes to what peripheral
+
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for sync to complete  
+	GCLK->CLKCTRL.reg |= 0<<14;	//disable clock
+
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_EIC | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genclk for EIC...this is a single write method i believe
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_SERCOM4_CORE | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genclk for sercom4 UART
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_ADC | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genclk for ADC
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_TC4_TC5 | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genCLK for TC4
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_SERCOM1_CORE | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genCLK for SERCOM2Core SPI
+	while (GCLK->STATUS.bit.SYNCBUSY==1){}	//waiting for sync to complete  
+		
+// setting up the CPU and APB and AHB buses clocks
+
+	PM->CPUSEL.bit.CPUDIV = 0;	//divide CPU clock by 1	
+	PM->APBASEL.bit.APBADIV = 0;	//divide apba bus by 64
+	PM->APBBSEL.bit.APBBDIV = 0;	//divide apbb bus by 64 (2^n) 
+	PM->APBCSEL.bit.APBCDIV = 0;	//divide apbc bus by 64
+	PM->APBAMASK.reg = PM_APBAMASK_EIC | PM_APBAMASK_GCLK | PM_APBAMASK_PM | PM_APBAMASK_SYSCTRL;	//enable apb's
+	PM->APBCMASK.reg = PM_APBCMASK_TC4 | PM_APBCMASK_SERCOM4 | PM_APBCMASK_ADC | PM_APBCMASK_SERCOM1;	//enable apb's
+	//PM->SLEEP.reg = PM_SLEEP_IDLE_CPU;	//idle mode selection
+	//SCB->SCR = 1<<SCB_SCR_SLEEPDEEP_Pos;	//sets the system controller to idle=0 or standby=1
+	//SCB->SCR = SCB_SCR_SLEEPONEXIT_Msk;	//will out back to sleep after interrupt is cleared
+}
+
+
+void portSetup(void){
+	Port *por = PORT;
+	PortGroup *porB = &(por->Group[1]);
+	porB->DIR.reg = 0x07ff;	//set PB00-PB07 to outputs
+	
+	//porA->DIRCLR.reg = 1<<4;	//setting up PB06 as input
+	//porA->PMUX[3].bit.PMUXE = 0;	//mux the EIC to pin PA06 (6=2*n)	EXTINT[6]
+	//porA->PINCFG[6].bit.PMUXEN =1;	//enable the MUX
+	//porA->PINCFG[6].bit.INEN =1;	//allows us to setup input and see it (not needed for EIC)
+	//porA->PINCFG[6].bit.PULLEN =1;	//allows us to pull on pin,  we need INEN to do this
+	//porA->OUT.reg |= 0<<6;	//needed to make oull down
+	//porB->DIRSET.reg |= 1<<8;	//setup PB08 as transmit pin 
+	//porB->DIRCLR.reg = 1<<9;	//setup PB09 as receive pin ***note cannot do |= must do = only, it fucks it up****
+	
+}
+
+void busyCheck(void){	//checks the busy flag
+	Port *por = PORT;
+	PortGroup *porB = &(por->Group[1]);
+	//porB->DIRCLR.reg = D7;	//set PB07 as input this is going to read busy bit 1==busy
+	//porB->OUTSET.reg = RW;
+	//porB->OUTCLR.reg = RS;
+	wait(1);
+	//while(porB->IN.reg == 0b10000000){}
+	//porB->DIRSET.reg = D7;	//set PB07 as output
+
+	
+}
+	
+void EnToggle(void){	//this toggles the En pin which enables instruction
+	Port *por = PORT;
+	PortGroup *porB = &(por->Group[1]);
+	porB->OUTSET.reg = En;
+	porB->OUTCLR.reg = En;
+}
+
+void instructionSetup(void){
+	Port *por = PORT;
+	PortGroup *porB = &(por->Group[1]);
+	busyCheck();
+	porB->OUT.reg = 0b0000000001;	//clear display and sets address to 0
+	EnToggle();
+	busyCheck();
+	porB->OUT.reg =	0b0000111000;	//function set mode, 2 line, 5x8, 8 bit mode
+	EnToggle();
+	busyCheck();
+	porB->OUT.reg = 0b0000001111;	//turns off display, cursor, and blinking
+	EnToggle();
+	busyCheck();
+	porB->OUT.reg =	0b0000000110;	//entry mode, increments dram by 1 to the right
+	EnToggle();
+	//busyCheck();
+	//porB->OUT.reg =	0b0011000000;	// set DDRAM address to 2nd line 0x40 offset
+	//EnToggle();
+	
+
+}
+
+//////////////////////functions////////////////////
+void writeLCD(char *a){
+	Port *por = PORT;
+	PortGroup *porB = &(por->Group[1]);
+	busyCheck();
+	porB->OUT.reg = 0 | *a ;
+	porB->OUTSET.reg = RS;
+	porB->OUTCLR.reg = RW;
+	EnToggle();	
+	
+	
+	
+}
+void wait(volatile int d){
+	int count = 0;
+	while (count < d*1000){
+		count++;
+	}
+}
