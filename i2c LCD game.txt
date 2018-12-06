@@ -1,0 +1,653 @@
+#include <asf.h>
+
+#define SLAVE_ADDR       0x78
+
+/*Prototypes*/
+void clock_setup(void);
+void port_setup(void);
+void I2C_master_setup(void);
+void LCD_write(void);
+void busy_check(void);
+void wait(volatile int d);
+void poll(void);
+void game_setup(void);
+void congrats(void);
+
+/* Global Variables */
+volatile bool tx_done = false;
+volatile uint8_t setup_buf[] = {0x00, 0x38, 0x39, 0x14, 0x78, 0x5E, 0x6D, 0x0c, 0x01, 0x06};	//initial LCD setup 
+volatile uint8_t shift_buf[] = {0x80, 0x38, 0x00, 0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18};	//shift out display
+volatile uint8_t oneLine_buf[] = {0x00, 0x01, 0x02, 0x34};	//reset setup for 1 line
+volatile uint8_t reset_buf[] = {0x00, 0x01, 0x02, 0x38};	//reset setup for game (2 line)	
+volatile uint8_t jump_buf[] = {0x80, 0xC0};	//jump to second line		
+// volatile uint8_t data_buf[] = {0x40, 0x48, 0x65, 0x72, 0x65, 0x20, 0x69, 0x73, 0x20, 0x79, 0x6F, 0x75, 0x72, 0x20, 0x53, 0x77, 0x65, 0x65, 0x74};	//"Here is your Sweet"
+// volatile uint8_t data_buf[] = {0x80, 0xC0, 0x40, 0x42, 0x61, 0x62, 0x79, 0x21, 0x21, 0x21};	//"Baby!!!"
+// volatile uint8_t data_buf[] = {0x40, 0x53, 0x57, 0x45, 0x45, 0x4E, 0x41, 0x4C, 0x49, 0x4E, 0x47, 0x54, 0x51, 0x57, 0x4E, 0x20, 0x32, 0x30, 0x31, 0x38};	//"SWEENALINGTOWN 2018"
+volatile char answer1_buf[] = "@NO";
+volatile char answer2_buf[] = "@NOPE";
+volatile char answer3_buf[] = "@PERHAPS";
+volatile char congrats1_buf[] = "@  CONGRATULATIONS  ";
+volatile char congrats2_buf[] = "@  !!!SWEET BABY!!!  ";
+volatile char title1_buf[] = "@Sweet Baby Inc.";
+volatile char title2_buf[] = "@presents";
+volatile char title3_buf[] = "@Are you a sweet baby";
+volatile char title4_buf[] = "@       ??????       ";
+volatile char title5_buf[] = "@ Choose A B C or D";
+
+volatile char *game_buf_ptr;
+volatile int temp;
+	
+int main (void){
+	
+	system_init();
+ 	clock_setup();
+	port_setup();
+	I2C_master_setup();
+	game_setup();
+	
+	
+	while(1){
+		poll();
+	}
+}
+
+
+void clock_setup(void){
+	SYSCTRL->INTFLAG.reg = SYSCTRL_INTFLAG_BOD33RDY | SYSCTRL_INTFLAG_BOD33DET | SYSCTRL_INTFLAG_DFLLRDY;
+	SYSCTRL->OSC8M.bit.PRESC = 0;	//divide the clock by 1
+	SYSCTRL->OSC8M.bit.ONDEMAND = 1;	//clock is off is no peripheral request
+	SYSCTRL->OSC8M.bit.RUNSTDBY = 0;	//clock is off in sleep mode
+	SYSCTRL->OSC8M.reg |= 1<<1;	//enable clock
+	//SYSCTRL->OSC8M.bit.FRANGE = 2;	//yet another way to control manipulate the clock freq
+	
+	SYSCTRL->OSC32K.bit.STARTUP = 0;	//start up asap
+	SYSCTRL->OSC32K.bit.ONDEMAND = 1;	//clock is off if no peripheral request
+	SYSCTRL->OSC32K.bit.RUNSTDBY = 1;	//clock is on in sleep mode
+	SYSCTRL->OSC32K.bit.EN32K = 1;	//enable output
+	SYSCTRL->OSC32K.reg |= 1<<1;	//enable clock
+	
+	GCLK->CTRL.bit.SWRST = 1;	//reset the generators
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for the reset to complete
+	
+	GCLK->GENDIV.reg = GCLK_GENDIV_ID(0) | GCLK_GENDIV_DIV(1);	//divide generator0 by 1
+	GCLK->GENDIV.reg = GCLK_GENDIV_ID(1) | GCLK_GENDIV_DIV(1);	//divide generator1 by 1
+
+	GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(0) | GCLK_GENCTRL_GENEN | GCLK_GENCTRL_OE |
+	GCLK_GENCTRL_SRC_OSC8M | GCLK_GENCTRL_RUNSTDBY;
+	
+	GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(1) | GCLK_GENCTRL_GENEN | GCLK_GENCTRL_OE |
+	GCLK_GENCTRL_SRC_OSC32K | GCLK_GENCTRL_RUNSTDBY;
+	
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for sync to complete
+	GCLK->CLKCTRL.reg |= 0<<14;	//disable clock
+	
+	while (GCLK->STATUS.bit.SYNCBUSY){}	//waiting for sync to complete  
+	GCLK->CLKCTRL.reg |= 0<<14;	//disable clock
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_SERCOM4_CORE | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genclk for sercom4	
+	GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_SERCOM0_CORE | GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genCLK for i2c
+	/**************    May Not Be necessary   ***************/
+	//GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_SERCOMX_SLOW| GCLK_CLKCTRL_GEN_GCLK0 | 1<<14;	//setup genCLK for i2c 
+	while (GCLK->STATUS.bit.SYNCBUSY==1){}	//waiting for sync to complete  
+		
+	PM->CPUSEL.bit.CPUDIV = 0;	//divide CPU clock by 1	pg 15
+	PM->APBASEL.bit.APBADIV = 0;	//divide apba bus by 1
+	PM->APBBSEL.bit.APBBDIV = 0;	//divide apbb bus by 1 
+	PM->APBCSEL.bit.APBCDIV = 0;	//divide apbc bus by 1
+	PM->APBCMASK.reg |= PM_APBCMASK_SERCOM4;	
+	PM->APBCMASK.reg |= PM_APBCMASK_SERCOM0;	
+
+
+
+}
+
+void port_setup(void){
+	Port *por = PORT;
+	PortGroup *porB = &(por->Group[1]);
+	PortGroup *porA = &(por->Group[0]);
+	
+	/* I2C */
+	porA->PMUX[4].bit.PMUXE = 2;	//Sercomm0 pad0 SDA PA08 
+	porA->PINCFG[8].bit.PMUXEN =1;	//enable the MUX
+	porA->PMUX[4].bit.PMUXO = 2;	//Sercomm0 PA09 pad1 SCL
+	porA->PINCFG[9].bit.PMUXEN=1;	//enable the MUX
+	
+	/* Keypad */
+	porA -> DIRCLR.reg = PORT_PA16 | PORT_PA17 | PORT_PA18 | PORT_PA19;//inputs keypad keys
+	porA -> PINCFG[16].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[17].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[18].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> PINCFG[19].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	porA -> DIRSET.reg = PORT_PA04 | PORT_PA05 | PORT_PA06 | PORT_PA07;//outputs power columns
+}
+
+void I2C_master_setup(void){
+	Sercom *ser = SERCOM0;
+	SercomI2cm *i2c = &(ser->I2CM);
+	i2c->CTRLA.reg = 0;	//disable first
+	while(i2c->SYNCBUSY.reg);
+	i2c->CTRLA.bit.SPEED = 0;	//standard(100kHz) or fast mode(400KHz)
+	i2c->CTRLA.bit.SDAHOLD = 2;
+	i2c->CTRLA.bit.MODE = 5;	//i2c master mode
+	i2c->CTRLB.bit.SMEN = 1;	//smart enable
+	i2c->CTRLB.bit.ACKACT = 0;	//send ACK
+	while(i2c->SYNCBUSY.reg);
+// 	i2c->BAUD.bit.BAUD = 22;	//baud to 22	standard mde 100kHz
+// 	i2c->BAUD.bit.BAUDLOW = 45;	 //baudlow to 45
+	i2c->BAUD.bit.BAUD = 3;	//baud 3.8 fast mode
+	i2c->BAUD.bit.BAUDLOW = 0;	 //baudlow 0
+
+	while(i2c->SYNCBUSY.reg);
+	i2c->INTENSET.bit.MB = 1;	//master on bus
+	i2c->CTRLA.reg |= 1<<1; //enable
+	while(i2c->SYNCBUSY.reg);
+	i2c->STATUS.bit.BUSSTATE = 1;	//force buss state into idle mode
+	while(i2c->SYNCBUSY.reg);	
+	NVIC->ISER[0] = 1 << 9;
+}
+
+void game_setup(void){
+	/* setup LCD */
+	temp = 1;
+	LCD_write();
+	
+	/* write title 1  */
+	temp = 2;
+	game_buf_ptr = title1_buf;	
+	LCD_write();
+	
+	/* jump line 2 */
+	temp = 5;
+	LCD_write();
+	
+	/* write title 2 */
+	temp = 2;
+	game_buf_ptr = title2_buf;	
+	LCD_write();
+	wait(100);
+	
+	/* shift out */
+	temp = 4;
+	LCD_write();
+	
+	/* reset */
+	temp = 3;
+	LCD_write();
+	
+	/* write title 3 */
+	temp = 2;
+	game_buf_ptr = title3_buf;	
+	LCD_write();
+	
+	/* jump line 2 */
+	temp = 5;
+	LCD_write();
+	
+	/* write title 4 */
+	temp = 2;
+	game_buf_ptr = title4_buf;	
+	LCD_write();
+	wait(100);
+	
+	/* shift out */
+	temp = 4;
+	LCD_write();
+	
+	/* reset */
+	temp = 3;
+	LCD_write();
+	
+	/* reset */
+	temp = 3;
+	LCD_write();
+	
+	/* write title 5 */
+	temp = 2;
+	game_buf_ptr = title5_buf;	
+	LCD_write();
+	
+}
+
+void congrats(void){
+	/* setup LCD for 1 line*/
+	temp = 6;
+	LCD_write();
+	
+	/* write congrats 1  */
+	temp = 2;
+	game_buf_ptr = congrats1_buf;	
+	LCD_write();
+	wait(100);
+	
+	/* reset */
+	temp = 3;
+	LCD_write();
+	
+	/* setup LCD for 1 line*/
+	temp = 6;
+	LCD_write();
+	
+	/* write congrats 2 */
+	temp = 2;
+	game_buf_ptr = congrats2_buf;	
+	LCD_write();
+	wait(100);
+	
+	/* reset */
+	temp = 3;
+	LCD_write();
+	
+	/* setup LCD for 1 line*/
+	temp = 6;
+	LCD_write();
+	
+	/* write congrats 2 */
+	temp = 2;
+	game_buf_ptr = congrats2_buf;	
+	LCD_write();
+	wait(100);
+	/* reset */
+	temp = 3;
+	LCD_write();
+	
+	/* setup LCD for 1 line*/
+	temp = 6;
+	LCD_write();
+	
+	/* write congrats 2 */
+	temp = 2;
+	game_buf_ptr = congrats2_buf;	
+	LCD_write();
+	wait(100);
+	
+}
+
+void LCD_write(void){
+	Sercom *ser = SERCOM0;
+	SercomI2cm *i2c = &(ser->I2CM);
+	i2c->ADDR.bit.ADDR = SLAVE_ADDR;	//write mode and address set
+	while(i2c->SYNCBUSY.reg);
+	while(!tx_done);
+	tx_done = false;
+
+}
+
+
+/* I2C Master handler */
+void SERCOM0_Handler(void){
+	Sercom *ser = SERCOM0;
+	SercomI2cm *i2c = &(ser->I2CM);
+	static int i;
+	/* Write instructins to LCD */
+
+	/* If master on buss */
+	if(i2c->INTFLAG.bit.MB){
+		
+		switch(temp){
+			case 1:
+			/* Setup LCD */
+			if(i < 10){
+				busy_check();
+				i2c->DATA.reg = setup_buf[i++];
+				while(i2c->SYNCBUSY.reg);
+			}
+			else{
+				/* After transferring the last byte stop condition will be sent */ 
+				i2c->CTRLB.bit.CMD = 0x3; 
+				while(i2c->SYNCBUSY.reg);
+				tx_done = true;
+				i = 0;
+			}	
+			break;
+			
+			case 2:
+			/* Game text */
+			if(*game_buf_ptr){
+					busy_check();
+					i2c->DATA.reg = *game_buf_ptr++;
+					while(i2c->SYNCBUSY.reg);
+			}
+				/* After transferring the last byte stop condition will be sent */ 
+				else{
+					i2c->CTRLB.bit.CMD = 0x3; 
+					while(i2c->SYNCBUSY.reg);
+					tx_done = true;
+				}
+			break;
+			
+			case 3:
+			/* game reset */
+			if(i < 4){
+				busy_check();
+				i2c->DATA.reg = reset_buf[i++];
+				while(i2c->SYNCBUSY.reg);
+			}
+			else{
+				/* After transferring the last byte stop condition will be sent */ 
+				i2c->CTRLB.bit.CMD = 0x3; 
+				while(i2c->SYNCBUSY.reg);
+				tx_done = true;
+				i = 0;
+			}	
+			break;
+			
+			case 4:
+			/* shift display */
+			if(i < 20){
+				busy_check();
+				i2c->DATA.reg = shift_buf[i++];
+				while(i2c->SYNCBUSY.reg);
+			}
+			else{
+				/* After transferring the last byte stop condition will be sent */ 
+				i2c->CTRLB.bit.CMD = 0x3; 
+				while(i2c->SYNCBUSY.reg);
+				tx_done = true;
+				i = 0;
+			}	
+			break;
+			
+			case 5:
+			/* jump to second line */
+			if(i < 2){
+				busy_check();
+				i2c->DATA.reg = jump_buf[i++];
+				while(i2c->SYNCBUSY.reg);
+			}
+			else{
+				/* After transferring the last byte stop condition will be sent */ 
+				i2c->CTRLB.bit.CMD = 0x3; 
+				while(i2c->SYNCBUSY.reg);
+				tx_done = true;
+				i = 0;
+			}	
+			break;
+			
+			case 6:
+			/* one line LCD*/
+			if(i < 4){
+				busy_check();
+				i2c->DATA.reg = oneLine_buf[i++];
+				while(i2c->SYNCBUSY.reg);
+			}
+			else{
+				/* After transferring the last byte stop condition will be sent */ 
+				i2c->CTRLB.bit.CMD = 0x3; 
+				while(i2c->SYNCBUSY.reg);
+				tx_done = true;
+				i = 0;
+			}	
+			break;
+			
+			default:
+			break;
+			
+		}
+	}
+}
+
+/*
+void SERCOM0_Handler(void){
+	Sercom *ser = SERCOM0;
+	SercomI2cm *i2c = &(ser->I2CM);
+	static int i;
+	/ * Write instructins to LCD * /
+
+	/ * If master on buss * /
+	if(i2c->INTFLAG.bit.MB){
+		switch(j){
+			case 0:
+			if(i < 10){
+				busy_check();
+				i2c->DATA.reg = instruction_buf1[i++];
+				while(i2c->SYNCBUSY.reg);
+			}
+			else{
+				/ * After transferring the last byte stop condition will be sent * / 
+				i2c->CTRLB.bit.CMD = 0x3; 
+				while(i2c->SYNCBUSY.reg);
+				tx_done = true;
+				i = 0;
+			}	
+			
+			break;
+			
+			case 1:
+			if(i < 20){
+					busy_check();
+					i2c->DATA.reg = data_buf1[i++];
+					while(i2c->SYNCBUSY.reg);
+				}
+			else{
+				/ * After transferring the last byte stop condition will be sent * / 
+				i2c->CTRLB.bit.CMD = 0x3; 
+				while(i2c->SYNCBUSY.reg);
+				tx_done = true;
+				i = 0;
+			}	
+			
+			break;
+			
+			case 2:
+			if(i < 10){
+				busy_check();
+				i2c->DATA.reg = data_buf2[i++];
+				while(i2c->SYNCBUSY.reg);
+			}
+			else{
+				/ * After transferring the last byte stop condition will be sent * / 
+				i2c->CTRLB.bit.CMD = 0x3; 
+				while(i2c->SYNCBUSY.reg);
+				tx_done = true;
+				i = 0;
+			}	
+			
+			break;
+			
+			case 3:
+			if(i < 22){
+					busy_check();
+					i2c->DATA.reg = instruction_buf2[i++];
+					while(i2c->SYNCBUSY.reg);
+				}
+				else{
+					/ * After transferring the last byte stop condition will be sent * / 
+					i2c->CTRLB.bit.CMD = 0x3; 
+					while(i2c->SYNCBUSY.reg);
+					tx_done = true;
+					i = 0;
+				}
+				
+			break;
+			
+			case 4:
+			if(i < 4){
+					busy_check();
+					i2c->DATA.reg = instruction_buf3[i++];
+					while(i2c->SYNCBUSY.reg);
+				}
+				else{
+					/ * After transferring the last byte stop condition will be sent * / 
+					i2c->CTRLB.bit.CMD = 0x3; 
+					while(i2c->SYNCBUSY.reg);
+					tx_done = true;
+					i = 0;
+				}
+				
+			break;
+			
+			case 5:
+			if(i < 20){
+					busy_check();
+					i2c->DATA.reg = data_buf3[i++];
+					while(i2c->SYNCBUSY.reg);
+				}
+				else{
+					/ * After transferring the last byte stop condition will be sent * / 
+					i2c->CTRLB.bit.CMD = 0x3; 
+					while(i2c->SYNCBUSY.reg);
+					tx_done = true;
+					i = 0;
+				}
+				
+			break;
+			
+			default:
+			break;
+		}
+		
+	}
+}*/
+
+void busy_check(void){	//checks the busy flag
+	wait(100);
+}
+
+void poll(void){
+	Port *por = PORT;
+	PortGroup *porA = &(por->Group[0]);
+	PortGroup *porB = &(por->Group[1]);
+	
+	static volatile int i=0;//counter
+	static volatile int x=0; //state (state machine)
+	static volatile  int CNT=0;  //counter (state machine)
+	static volatile  char T1;	//(state machine)
+	static volatile  int N=1;	//delay (state machine)
+	static volatile char key='9';//NULL char key (state machine)
+
+		key='#';
+		/* check first row */
+		porA -> OUTCLR.reg = PORT_PA07;//turn on left SSD/top row of keypad
+		porA -> OUTSET.reg = PORT_PA04 | PORT_PA05 | PORT_PA06;//turn off other SSD/top row of keypad
+		
+		if(porA->IN.reg&PORT_PA16)//checking PA16 for input 'A'
+		{
+			key='A';
+		}
+		//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA07;//turn off left SSD/top row of keypad
+			wait(1);//this wait is so the numbers don't get mixed up
+
+
+		/* check second row */
+		porA -> OUTCLR.reg = PORT_PA06;
+
+		if(porA->IN.reg&PORT_PA16)
+		key='B';
+		
+		//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA06;//turn off left SSD/top row of keypad
+			wait(1);//this wait is so the numbers don't get mixed up
+
+
+
+		/* check third row */
+		porA -> OUTCLR.reg = PORT_PA05;
+
+		if(porA->IN.reg&PORT_PA16)
+		key='C';
+			
+		//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA05;//turn off left SSD/top row of keypad
+			wait(1);//this wait is so the numbers don't get mixed up
+
+
+		/* check fourth row */
+		porA -> OUTCLR.reg = PORT_PA04;
+
+		if(porA->IN.reg&PORT_PA16)
+		key='D';
+		
+		
+		
+		//	wait(1);//this wait is here because the LEDs are on/off so fast that i cannot even see them
+		porA -> OUTSET.reg = PORT_PA04;//turn off left SSD/top row of keypad
+			wait(1);//this wait is so the numbers don't get mixed up
+		
+		switch(x){
+			case 0:				//state 0 checks for key pressed
+			if(key=='#'){
+			break;}
+			T1=key;
+			CNT=0;
+			x=1;
+			break;
+			
+			/* state 1 denouncing initial press */
+			case 1:	
+			if(key!=T1){
+				x=0;
+			break;}
+			CNT++;
+			if(CNT>N){	//pressed long enough
+				x=2;
+			break;}
+			break;
+			
+			/* state 2 process input */
+			case 2:				
+			if(key!='#'){
+				CNT=0;
+				if(key == 'A'){	
+					game_buf_ptr = answer1_buf;
+					temp = 3;
+					LCD_write();
+					temp = 2;
+					LCD_write();
+				}
+				else if(key == 'B'){	
+					game_buf_ptr = answer2_buf;
+					temp = 3;
+					LCD_write();
+					temp = 2;
+					LCD_write();
+				}
+				else if( key == 'C'){	
+					game_buf_ptr = answer3_buf;
+					temp = 3;
+					LCD_write();
+					temp = 2;
+					LCD_write();
+				}
+				else if(key == 'D'){
+					congrats();
+				}
+				else{
+					//game_buf_ptr = game_buf;
+					temp = 3;
+					LCD_write();
+					temp = 2;
+					LCD_write();
+				}
+			}
+			CNT=0;
+			x=3;
+			break;
+			
+			/* state 3 denouncing release */
+			case 3:				
+			if(key == '#'){
+				CNT++;
+				if(CNT>N){	//released long enough then reset
+					CNT=0;
+					x=0;
+				}
+				break;
+			}
+			CNT = 0;
+			break;
+			
+			default:
+			x=0;
+			break;
+		}
+}
+
+void wait(volatile int d){
+	int count = 0;
+	while (count < d*1000){
+		count++;
+	}
+}
+
+
+
